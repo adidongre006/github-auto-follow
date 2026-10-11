@@ -1,0 +1,2 @@
+# Runtime dependencies only. The workflow installs just this file.
+requests>=2.31,<3

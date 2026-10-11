@@ -1,0 +1,3 @@
+# Extra dependencies for running the unit tests locally.
+-r requirements.txt
+pytest>=8,<9

@@ -1,0 +1,102 @@
+# Discovers new GitHub profiles and follows a small, capped number of them.
+# See README.md for the one-time setup (the GH_TOKEN secret is REQUIRED).
+name: Auto Follow
+
+on:
+  schedule:
+    # Every 1 hours, at minute 17 (off the top of the hour, when Actions is busiest).
+    - cron: "17 */1 * * *"
+  workflow_dispatch:
+    inputs:
+      max_follows:
+        description: "Maximum follow attempts for this run (1-50)"
+        required: false
+        default: "5"
+        type: string
+      dry_run:
+        description: "Dry run: log who would be followed, but follow nobody"
+        required: false
+        default: false
+        type: boolean
+
+# Least privilege: nothing by default; the single job below asks only for what it needs.
+permissions: {}
+
+# One run at a time. A second run waits instead of racing on the history file.
+concurrency:
+  group: auto-follow
+  cancel-in-progress: false
+
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # only to commit data/users_follows.txt
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Optional: set the repository variable HISTORY_BRANCH to keep code AND
+          # history on a dedicated branch when the default branch is protected.
+          # Empty value = the normal default checkout.
+          ref: ${{ vars.HISTORY_BRANCH }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Discover and follow
+        env:
+          # A personal access token from the account that should do the following.
+          # The built-in GITHUB_TOKEN cannot follow users. GitHub masks secrets in logs.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          # Manual-run inputs win, then repository variables, then built-in defaults.
+          # Unset values arrive as empty strings, which the app treats as "use default".
+          MAX_FOLLOWS: ${{ inputs.max_follows || vars.MAX_FOLLOWS }}
+          DRY_RUN: ${{ inputs.dry_run || vars.DRY_RUN }}
+          SEARCH_QUERY: ${{ vars.SEARCH_QUERY }}
+          SEARCH_LANGUAGE: ${{ vars.SEARCH_LANGUAGE }}
+          MIN_ACCOUNT_AGE_DAYS: ${{ vars.MIN_ACCOUNT_AGE_DAYS }}
+          EXCLUDED_USERS: ${{ vars.EXCLUDED_USERS }}
+        run: python -m src.main
+
+      # always(): even if the run above failed or was cut short, keep the
+      # follows it already made so the next run does not repeat them.
+      - name: Commit follow history
+        if: always()
+        env:
+          TARGET_BRANCH: ${{ vars.HISTORY_BRANCH || github.ref_name }}
+        run: |
+          set -euo pipefail
+          FILE="data/users_follows.txt"
+
+          # Never commit when nothing changed.
+          if [ -z "$(git status --porcelain -- "$FILE")" ]; then
+            echo "No history changes; nothing to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- "$FILE"
+          git commit -m "chore: update follow history"
+
+          # The file is append-only (see .gitattributes), so rebasing is safe.
+          for attempt in 1 2 3; do
+            if git pull --rebase origin "$TARGET_BRANCH" && git push origin "HEAD:${TARGET_BRANCH}"; then
+              echo "History pushed to ${TARGET_BRANCH}."
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            echo "Push attempt ${attempt} failed; retrying..."
+            sleep $((attempt * 5))
+          done
+          echo "::error::Could not push the history update. If the branch is protected, set the HISTORY_BRANCH variable (see README)."
+          exit 1

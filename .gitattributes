@@ -1,0 +1,3 @@
+# The history file is append-only. "union" tells git to keep both sides' new
+# lines when two branches both appended, instead of raising a merge conflict.
+data/users_follows.txt merge=union
