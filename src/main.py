@@ -77,8 +77,8 @@ class RunControl:
 def configure_logging(token: str = "") -> None:
     """Log to stdout with UTC timestamps; redact the token if one is given."""
     handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s", "%Y-%m-%dT%H:%M:%SZ")
-    formatter.converter = time.gmtime  # timestamps in UTC
+    formatter = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s", "%Y - %m - %d |T:>%H:%M:%S IST")
+    formatter.converter =lambda secs:time.gmtime(secs + 19800)  # timestamps in UTC
     handler.setFormatter(formatter)
     handler.addFilter(SecretRedactionFilter([token]))
     root = logging.getLogger()
