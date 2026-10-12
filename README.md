@@ -1,228 +1,344 @@
 # GitHub Profile Automation
 
-A small, careful GitHub Actions bot that **discovers GitHub profiles** with the
-official search API and **follows a capped number of them per run** from an
-account you own and are authorized to automate. Every confirmed follow is
-logged to `data/users_follows.txt` with an ISO 8601 UTC timestamp.
+> Python + GitHub Actions automation to discover public GitHub profiles, apply eligibility rules, follow a small capped number of accounts, and log confirmed follows.
+>
+> **Responsible use:** Keep limits conservative and comply with GitHub's current Terms of Service and Acceptable Use Policies. Automated bulk engagement may cause rate limits or account restrictions.
 
-> **Please use it responsibly.** GitHub's Acceptable Use Policies prohibit
-> excessive automated bulk activity and inauthentic interactions. Mass or
-> follow-for-follow campaigns can get an account rate limited or restricted.
-> The defaults (5 follows every 6 hours, hard ceiling of 50 per run) are
-> deliberately small. You are responsible for how you configure and use this.
+## Project overview
 
-## 1. Overview and architecture
+| Item | Details |
+|---|---|
+| Language | Python 3.12+ |
+| Automation | GitHub Actions |
+| API | GitHub REST API |
+| Runtime dependency | `requests` |
+| Test framework | `pytest` |
+| Default follow limit | `5` attempts per run |
+| Hard limit | `50` attempts per run |
+| Default minimum account age | `30` days |
+| History file | `data/users_follows.txt` |
+| Triggers | Scheduled and manual |
+| Dry run | Supported; no follow action or history write |
 
+## Features
+
+| Feature | What it does |
+|---|---|
+| Profile discovery | Searches public GitHub profiles using the official user-search API. |
+| Eligibility | Filters by account type, account age, and excluded usernames. |
+| Duplicate prevention | Deduplicates account IDs; skips your own profile and usernames already in history. |
+| Follow limits | Enforces a configurable per-run cap, a hard ceiling, request delays, and a runtime budget. |
+| Dry run | Logs planned actions without following accounts or writing history. |
+| API resilience | Uses timeouts, bounded retries, backoff, and rate-limit-aware stopping. |
+| Audit history | Records confirmed follows with UTC timestamps. |
+| CI automation | Supports scheduled/manual runs and concurrency protection. |
+| Tests | Mocks GitHub API calls so tests do not follow real accounts. |
+
+## How it works
+
+| Step | Action |
+|---:|---|
+| 1 | GitHub Actions starts on schedule or manual trigger. |
+| 2 | The app validates settings and authenticates with `GH_TOKEN`. |
+| 3 | Discovery searches GitHub, deduplicates results, and skips self/history entries. |
+| 4 | Eligibility rules accept or reject candidates with a reason. |
+| 5 | The follow service checks following status and applies limits/delays. |
+| 6 | A follow is logged only after GitHub returns `204 No Content`. |
+| 7 | The workflow attempts to commit changed history to the configured branch. |
+
+```mermaid
+flowchart TD
+    A[Schedule or manual trigger] --> B[Validate settings and token]
+    B --> C[Search public profiles]
+    C --> D[Deduplicate and skip history]
+    D --> E[Apply eligibility filters]
+    E --> F{Dry run?}
+    F -- Yes --> G[Log planned actions]
+    F -- No --> H[Check following status]
+    H --> I[Follow within limits]
+    I --> J{HTTP 204?}
+    J -- Yes --> K[Append UTC history]
+    J -- No --> L[Log failure or stop safely]
+    G --> M[Execution summary]
+    K --> M
+    L --> M
+    M --> N[Persist changed history]
 ```
-search users ──► discovery ──► eligibility ──► follow service ──► history file
- (GitHub API)    (find, dedupe,  (type, age,     (already followed?    (append-only
-                  skip history)   exclusions)     PUT follow, 204)      text file)
+
+## Repository layout
+
+| Path | Responsibility |
+|---|---|
+| `.github/workflows/auto-follow.yml` | Triggers, inputs, permissions, concurrency, and history persistence. |
+| `src/config.py` | Loads and validates configuration; protects token values. |
+| `src/github_client.py` | API requests, timeouts, retries, backoff, and rate-limit handling. |
+| `src/discovery.py` | Searches pages, deduplicates account IDs, and skips self/history. |
+| `src/eligibility.py` | Applies account type, age, and exclusion rules. |
+| `src/follow_service.py` | Runs the follow pipeline and enforces limits. |
+| `src/history.py` | Reads and appends UTC history records. |
+| `src/main.py` | Orchestrates modules, logs summaries, and returns exit codes. |
+| `tests/` | Unit tests using mocked API calls. |
+| `data/users_follows.txt` | Append-only follow history. |
+| `requirements.txt` | Runtime dependencies. |
+| `requirements-dev.txt` | Runtime and test dependencies. |
+| `pytest.ini` | Pytest configuration. |
+| `.gitignore`, `.gitattributes` | Git exclusions and history merge behavior. |
+
+## Requirements
+
+| Requirement | Details |
+|---|---|
+| GitHub account | The account that will perform follows. |
+| Repository | GitHub repository with Actions enabled. |
+| Python | 3.12+ for local runs/tests. |
+| Secret | `GH_TOKEN` containing a PAT with follow permission. |
+| Workflow permission | `contents: write` for the history-update job. |
+
+## Setup
+
+### 1. Push the project
+
+Ensure `src/` and `.github/workflows/auto-follow.yml` are at the repository root.
+
+```bash
+git init -b main
+git add .
+git commit -m "Initial commit"
+git remote add origin git@github.com:adidongre006/github-auto-follow.git
+git push -u origin main
 ```
 
-| Module | Job |
-| --- | --- |
-| `src/config.py` | Reads and validates environment variables; keeps the token out of `repr`. |
-| `src/github_client.py` | HTTP calls, timeouts, retries/backoff, rate-limit handling, typed errors. |
-| `src/discovery.py` | Lazy paginated search, dedupe by account ID, skips self and history. |
-| `src/eligibility.py` | Explainable accept/reject rules. |
-| `src/follow_service.py` | The follow pipeline, limits, and safe-stop logic. |
-| `src/history.py` | Reads/appends `users_follows.txt`, UTC timestamp formatting. |
-| `src/main.py` | Wiring, logging, signal handling, summary, exit codes. |
+### 2. Create a personal access token
 
-## 2. Repository structure
+Create the token while signed in to the account that should follow profiles.
 
-```
-.github/workflows/auto-follow.yml   workflow (schedule + manual)
-src/                                application code (see table above)
-tests/                              unit tests, all GitHub calls mocked
-data/users_follows.txt              persistent follow history
-requirements.txt                    runtime dependency (requests)
-requirements-dev.txt                adds pytest for local testing
-pytest.ini  .gitignore  .gitattributes  LICENSE  README.md
-```
+| Token type | Required permission |
+|---|---|
+| Fine-grained (preferred) | Account permissions → **Followers: Read and write**. Repository access is not needed for following. |
+| Classic | Only the `user:follow` scope. |
 
-## 3. GitHub token setup
+Set an expiration date and store the token securely. Never commit it, paste it into issues/chat, or print it in logs.
 
-**`GITHUB_TOKEN` vs. your own token.** The built-in `GITHUB_TOKEN` that Actions
-creates for every run belongs to a *GitHub App installation* (a bot) and is
-scoped to the repository. It can commit files, but it **cannot follow users**.
-Following needs a token that belongs to *a real user account*: a **personal
-access token (PAT)** you create yourself. The bot follows as that account.
-This project uses both: `GITHUB_TOKEN` (automatic) to commit the history file,
-and your PAT (secret `GH_TOKEN`) to follow.
+### 3. Add the secret
 
-Create the PAT while signed in to the account that should do the following:
+Go to **Repository → Settings → Secrets and variables → Actions → Secrets → New repository secret**.
 
-1. GitHub → **Settings → Developer settings → Personal access tokens**.
-2. Either:
-   * **Fine-grained token** (preferred): *Account permissions → Followers →
-     Read and write*. No repository access is needed. Set a short expiration.
-   * **Classic token**: tick only the **`user:follow`** scope.
-3. Copy the token once, then store it as a secret (next section). Never paste
-   it in code, issues, logs, or chat.
+| Name | Value |
+|---|---|
+| `GH_TOKEN` | Your personal access token (PAT) |
 
-## 4. Required token permissions
+### 4. Allow history commits
 
-| Operation | Endpoint | Needs |
-| --- | --- | --- |
-| Who am I | `GET /user` | any valid token |
-| Discover | `GET /search/users` | any valid token (higher rate limit when authenticated) |
-| Profile details | `GET /users/{username}` | public data, no extra permission |
-| Check following | `GET /user/following/{username}` | any valid token |
-| Follow | `PUT /user/following/{username}` | **Followers: write** (fine-grained) / **`user:follow`** (classic) |
+In **Settings → Actions → General → Workflow permissions**, allow the workflow to use `contents: write` where required. Respect branch protection and review rules.
 
-If following fails with a 403/404 for every user, the token almost certainly
-lacks that permission; the run aborts after a few consecutive failures.
+### 5. Test safely
 
-## 5. GitHub Actions configuration (exact steps)
+1. Open **Actions → Auto Follow → Run workflow**.
+2. Enable **Dry run** and set a small limit, such as `5`.
+3. Inspect logs and candidate selection.
+4. Disable dry run only after confirming the behavior is expected.
 
-1. Create a new repository (private is fine) and push this project to it.
-2. **Settings → Secrets and variables → Actions → Secrets → New repository
-   secret**: name `GH_TOKEN`, value = your PAT.
-3. **Settings → Actions → General → Workflow permissions**: leave on the
-   default; the workflow declares its own `contents: write` for the job.
-   (If your organization forces read-only, choose "Read and write".)
-4. *(Optional)* **Variables** tab → add any of: `MAX_FOLLOWS`, `SEARCH_QUERY`,
-   `SEARCH_LANGUAGE`, `MIN_ACCOUNT_AGE_DAYS`, `EXCLUDED_USERS`, `DRY_RUN`,
-   `HISTORY_BRANCH`.
-5. **Actions** tab → **Auto Follow** → **Run workflow** → tick **Dry run**
-   for your first run and read the log. Then run it for real.
+## Authentication and API permissions
 
-No per-profile approval exists. If you attach the job to a protected
-*Environment*, GitHub's own approval rules for that environment still apply
-and are never bypassed.
+| Credential | Purpose | Important note |
+|---|---|---|
+| `GH_TOKEN` | Authenticates as your user for follow actions. | PAT with follow permission; store as a repository secret. |
+| `GITHUB_TOKEN` | Allows the workflow to update repository contents. | Automatically generated and repository-scoped; it cannot perform user follows. |
 
-## 6. Scheduled and manual execution
+| Operation | REST endpoint | Requirement |
+|---|---|---|
+| Identify authenticated user | `GET /user` | Valid token |
+| Search users | `GET /search/users` | Valid token |
+| Get profile details | `GET /users/{username}` | Public profile access |
+| Check following status | `GET /user/following/{username}` | Valid token |
+| Follow a user | `PUT /user/following/{username}` | Fine-grained **Followers: write** or classic `user:follow` |
 
-* **Schedule:** `cron: "17 */6 * * *"` (every 6 hours at minute 17, UTC). Edit
-  the cron line in `auto-follow.yml` to change it.
-* **Manual:** Actions → Auto Follow → Run workflow, with optional `max_follows`
-  and `dry_run` inputs.
-* A `concurrency` group prevents overlapping runs; the job times out after
-  15 minutes, and the app also stops itself after `MAX_RUNTIME_SECONDS` (600).
+## Configuration reference
 
-## 7. Per-run attempt limit
+Set non-secret values in **Settings → Secrets and variables → Actions → Variables**. Keep `GH_TOKEN` under **Secrets**. Unset variables use their defaults.
 
-Priority: manual-run input → repository variable `MAX_FOLLOWS` → default **5**.
-Allowed range 1-50 (hard ceiling in `src/config.py`). An *attempt* is a follow
-request that was actually sent; already-followed accounts do not count.
-
-## 8. How discovery works
-
-* Query = `SEARCH_QUERY` (default `type:user repos:>=1`) + optional
-  `language:<SEARCH_LANGUAGE>` + `created:<cutoff>` derived from
-  `MIN_ACCOUNT_AGE_DAYS` (default 30). Sorted by `joined`, newest first.
-* Pages of 100, at most `MAX_SEARCH_PAGES` (default 3; the API exposes only the
-  first 1000 results). Pages are fetched lazily, only when more candidates are needed.
-* Deduplicated by numeric account ID; your own account and everything already in the
-  history file are skipped.
-* Eligibility: allowed account types (`ACCOUNT_TYPES`, default `user`),
-  `EXCLUDED_USERS`, minimum account age, and profile availability (a 404 on the
-  profile means deleted or suspended). Only public, documented fields are used.
-  Every skip is logged with a short reason.
-
-### All settings
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `GH_TOKEN` | *(required)* | Personal access token (secret). |
-| `MAX_FOLLOWS` | 5 | Follow attempts per run (1-50). |
+| Setting | Default | Purpose / accepted values |
+|---|---:|---|
+| `GH_TOKEN` | Required secret | PAT with follow permission. |
+| `MAX_FOLLOWS` | `5` | Follow attempts per run; range `1–50`. |
 | `SEARCH_QUERY` | `type:user repos:>=1` | GitHub user-search query. |
-| `SEARCH_LANGUAGE` | *(none)* | Adds `language:<x>`. |
-| `SEARCH_SORT` / `SEARCH_ORDER` | `joined` / `desc` | `joined`, `followers`, `repositories`, `best-match`. |
-| `MAX_SEARCH_PAGES` | 3 | Search pages per run (1-10). |
-| `ACCOUNT_TYPES` | `user` | Comma list of `user`, `organization`, `bot`. |
-| `MIN_ACCOUNT_AGE_DAYS` | 30 | 0 disables. |
-| `EXCLUDED_USERS` | *(none)* | Comma/space separated usernames. |
-| `DRY_RUN` | false | Log only; follow nobody; write no history. |
-| `HISTORY_FILE` | `data/users_follows.txt` | History location. |
-| `FOLLOW_DELAY` | 2 | Seconds between follow requests. |
-| `REQUEST_TIMEOUT` / `MAX_RETRIES` | 15 / 3 | HTTP timeout and bounded retries. |
-| `MAX_RATE_LIMIT_WAIT` | 60 | Longest rate-limit wait accepted; otherwise the run stops. |
-| `MAX_RUNTIME_SECONDS` | 600 | Internal time budget. |
-| `MAX_CONSECUTIVE_FAILURES` | 5 | Abort threshold. |
+| `SEARCH_LANGUAGE` | Unset | Optional language filter, appended as `language:<value>`. |
+| `SEARCH_SORT` | `joined` | `joined`, `followers`, `repositories`, or `best-match`. |
+| `SEARCH_ORDER` | `desc` | Search order, e.g. `asc` or `desc` where supported. |
+| `MAX_SEARCH_PAGES` | `3` | Search pages; range `1–10`, up to 100 results per page. |
+| `ACCOUNT_TYPES` | `user` | Comma-separated allowed types: `user`, `organization`, `bot`. |
+| `MIN_ACCOUNT_AGE_DAYS` | `30` | Minimum account age in days; `0` disables this filter. |
+| `EXCLUDED_USERS` | Unset | Comma- or space-separated usernames to skip. |
+| `DRY_RUN` | `false` | `true` logs proposed actions without following or writing history. |
+| `HISTORY_FILE` | `data/users_follows.txt` | Append-only history file path. |
+| `HISTORY_BRANCH` | Workflow default branch | Optional branch for history persistence. |
+| `FOLLOW_DELAY` | `2` | Seconds between follow requests. |
+| `REQUEST_TIMEOUT` | `15` | HTTP request timeout in seconds. |
+| `MAX_RETRIES` | `3` | Bounded retry count for transient errors. |
+| `MAX_RATE_LIMIT_WAIT` | `60` | Maximum accepted rate-limit wait; longer waits stop the run safely. |
+| `MAX_RUNTIME_SECONDS` | `600` | Application runtime budget. |
+| `MAX_CONSECUTIVE_FAILURES` | `5` | Stop after this many consecutive failures. |
 
-## 9. History persistence
+**Limit precedence:** A manual workflow input takes priority over the `MAX_FOLLOWS` variable, which takes priority over the default `5`. The app enforces the hard ceiling of `50`.
 
-One line per confirmed follow:
+## Run and schedule
 
-```
+| Method | How to run |
+|---|---|
+| Scheduled | The `cron` value in `.github/workflows/auto-follow.yml` is the source of truth. Cron schedules use UTC and may be delayed by GitHub Actions. |
+| Manual | Open **Actions → Auto Follow → Run workflow** and set available inputs such as `max_follows` or `dry_run`. |
+| Local dry run | Set `GH_TOKEN` securely and run `DRY_RUN=true python -m src.main`. |
+
+Example cron schedules (UTC):
+
+| Cron | Meaning |
+|---|---|
+| `17 */6 * * *` | Every 6 hours, at minute 17. |
+| `17 * * * *` | Every hour, at minute 17. |
+| `17 9 * * *` | Daily at 09:17. |
+| `17 9 * * 1` | Every Monday at 09:17. |
+
+> **Schedule note:** The walkthrough and technical reference have described different intervals. Check the actual workflow YAML before relying on a particular cadence.
+
+### Protected default branch
+
+| Situation | Recommended action |
+|---|---|
+| Default branch blocks direct pushes | Configure `HISTORY_BRANCH` to a permitted automation branch. |
+| History update fails | Verify checkout/push logic and `contents: write` permission. |
+| Organization requires approvals | Follow the normal environment and branch-protection rules; do not bypass them. |
+
+## History and persistence
+
+Example `data/users_follows.txt` line:
+
+```text
 2026-10-10T16:30:00Z | username | https://github.com/username
 ```
 
-* Written only after GitHub answers **204**, immediately (flushed + fsync'd), so
-  an interrupted run loses nothing.
-* Append-only; the file is re-read before each append so duplicates are never written.
-* Blank lines and `#` comments are ignored; malformed lines are logged and skipped.
-* The workflow commits the file (`if: always()`, only when it changed) and retries
-  `pull --rebase` + `push`. `.gitattributes` marks the file `merge=union`, and the
-  `concurrency` group prevents two runs from overlapping.
-* **Protected default branch?** Create a branch (e.g. `automation`) from it, set
-  the repository variable `HISTORY_BRANCH=automation`, and the workflow will check out
-  and push to that branch. Merge code changes into it yourself. The bot never bypasses
-  branch protection, required reviews, or any policy.
-* **When to move beyond a text file:** if the history grows past tens of thousands of
-  lines, you need to store more fields (failures, reasons), or several writers
-  need it at once, switch to JSONL (still append-only, easier to parse) and then to
-  SQLite or a database.
+| Rule | Behavior |
+|---|---|
+| Timestamp | ISO 8601 UTC, ending in `Z`. |
+| When recorded | Only after GitHub confirms the follow with `204 No Content`. |
+| File behavior | Append-only; history is re-read before appending. |
+| Parsing | Blank lines and `#` comments are ignored; malformed lines are logged and skipped. |
+| Persistence | Workflow attempts to commit changed history and may retry a rebase/push. |
+| Concurrent runs | A concurrency group prevents overlapping runs in the same group. |
+| Not recorded | Already-followed profiles and profiles rejected by eligibility rules. These may be reconsidered later. |
 
-## 10. Error handling and troubleshooting
+## Execution summary and exit codes
 
-| Symptom | Meaning / fix |
-| --- | --- |
-| `GH_TOKEN is not set` (exit 2) | Add the repository secret. |
-| `looks like ... installation token` | You supplied `GITHUB_TOKEN`; use a PAT. |
-| `GitHub rejected the token (401)` | Token expired or revoked; create a new one. |
-| `Forbidden (403)` / repeated `Follow returned 404` | Token lacks Followers/`user:follow` permission. |
-| `rate limit` warnings, run ends early | Normal and safe. Next scheduled run continues. |
-| `Could not push the history update` | Branch protection; use `HISTORY_BRANCH`. |
-| `No more candidates` | Everything found was already processed; change the query. |
+| Metric | Meaning |
+|---|---|
+| Raw profiles discovered | Search results received, including duplicates. |
+| Unique profiles found | Results after deduplication. |
+| Unique profiles considered | New candidates after skipping self and history entries. |
+| Skipped: own account | Authenticated account was ignored. |
+| Skipped: history | Username already appears in history. |
+| Rejected by eligibility | Candidate failed one or more rules. |
+| Followed successfully | GitHub confirmed the follow and a history record was written. |
+| Already followed | No new follow request was needed. |
+| Failed attempts | Follow or profile-processing errors. |
+| Rate-limit interruption | Application stopped or deferred work due to rate limits. |
+| Interrupted | Run was cancelled or reached its time budget. |
 
-Exit codes: `0` ok (including rate-limit/time-limit stops), `1` failure, `2` bad config, `130` cancelled.
+| Exit code | Meaning |
+|---:|---|
+| `0` | Completed, including safe rate-limit or time-budget stops. |
+| `1` | Runtime failure, such as authentication or history persistence failure. |
+| `2` | Invalid configuration. |
+| `130` | Cancelled by an interrupt signal. |
 
-## 11. API rate limits and automation constraints
+## Safety and security
 
-Primary limits: 5,000 requests/hour for a user token; the search API allows about
-30 requests/minute. GitHub also applies *secondary* limits to rapid mutating
-requests, so the bot pauses between follows. It honours `Retry-After` and
-`X-RateLimit-Reset`, retries only transient errors (network, 500/502/503/504) with
-exponential backoff (1s, 2s, 4s, ... capped at 30s), and **stops** instead of
-waiting when the required wait exceeds `MAX_RATE_LIMIT_WAIT`. It uses exactly one
-token and never tries to work around limits.
+| Risk | Mitigation |
+|---|---|
+| Excessive activity | Default of 5 attempts, hard ceiling of 50, request delay, page limit, and runtime budget. |
+| Duplicate profiles | Deduplication by account ID and history checks. |
+| API rate limits | Bounded retries, server wait hints, and safe stopping. |
+| Temporary network errors | Exponential backoff capped at 30 seconds. |
+| Invalid token | Clear failure; repeated consecutive failures trigger an abort. |
+| Uncertain response | Only `204 No Content` counts as a confirmed follow. |
+| Token exposure | Secret environment variable; token excluded from representations/logs. |
+| Excessive permissions | PAT only needs follow permission; repository write is scoped to history updates. |
+| Overlapping runs | GitHub Actions concurrency group. |
 
-## 12. Security considerations
+- Prefer an expiring fine-grained PAT and rotate it regularly.
+- Never attempt to bypass rate limits with extra tokens or accounts.
+- This project follows accounts only; it does **not** unfollow or reconcile accounts.
+- Respect repository branch protection, required reviews, and environment approvals.
 
-* The token is read from `GH_TOKEN`, never hard-coded, written to disk, or logged.
-  It is excluded from `repr()`, error messages are built from status codes and
-  GitHub's message only, and a log filter masks it as a last line of defence.
-* Least privilege: workflow permissions are `{}` globally and `contents: write`
-  for the one job; the PAT needs only follow permission and no repository access.
-* Only public profile fields are used; the history stores username, URL and time.
-* Action versions are pinned to major tags (`@v4`, `@v5`); pin to full commit SHAs
-  if your threat model requires it.
-* Prefer a fine-grained token with an expiration date and rotate it regularly.
+## Troubleshooting
 
-## 13. Local development and testing
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `GH_TOKEN is not set` | Missing or misspelled secret | Add the repository secret named exactly `GH_TOKEN`. |
+| Token begins `ghs_...` | Workflow token used instead of a user PAT | Create a PAT with follow permission. |
+| `401 Unauthorized` | Expired, revoked, or incorrect token | Replace the PAT and update the secret. |
+| `403 Forbidden` or repeated follow `404` | Permission or authorization issue | Verify **Followers: Read and write** or `user:follow`. |
+| History push fails | Branch protection or missing write permission | Configure `HISTORY_BRANCH` and verify workflow permissions. |
+| Rate-limit warning / early stop | GitHub asked the client to slow down | Let a later run continue; do not bypass the limit. |
+| No candidates found | Search exhausted or candidates filtered/processed | Review search, language, exclusions, and account-age settings. |
+| Schedule stops running | Scheduled workflows may be disabled on inactive public repositories | Check the Actions tab and re-enable if needed. |
+| Configuration validation error | Invalid variable value or format | Correct or remove the variable, then rerun. |
+
+### Stop the automation
+
+| Goal | Action |
+|---|---|
+| Pause future runs | Disable the workflow in **Actions → Auto Follow**. |
+| Cancel current run | Open the active run and choose **Cancel workflow**. |
+| Revoke automation access | Remove `GH_TOKEN` from repository secrets and revoke the PAT in GitHub settings. |
+
+## Local development and tests
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
-pytest                      # all GitHub calls are mocked; nobody is ever followed
+pytest
+```
 
-# Optional real run, with a dry run first:
-export GH_TOKEN="<your PAT>"   # keep it out of shell history / files
+Local read-only discovery / dry run:
+
+```bash
+export GH_TOKEN="<your-personal-access-token>"
 DRY_RUN=true python -m src.main
 ```
 
-## 14. Known limitations
+| Practice | Reason |
+|---|---|
+| Run tests before changes | API calls are mocked; tests should not follow real accounts. |
+| Keep tokens out of shell history | Use your operating system's secure environment-variable method. |
+| Review local history before committing | Local runs use the configured history path. |
 
-* Accounts you already follow, or that fail an eligibility rule, are not written to
-  history (only confirmed follows are), so they are re-checked on later runs.
-* The search API caps results at 1,000 per query, so a narrow query can run dry.
-* Account age is only checked when GitHub provides `created_at`.
-* GitHub disables scheduled workflows in public repositories after 60 days
-  without repository activity; re-enable them in the Actions tab if that happens.
-* Follow requests are not unfollowed or reconciled; this tool only adds follows.
-* The code was written against GitHub's REST API (version `2022-11-28`) from
-  existing knowledge. Re-verify endpoints and permission names against the current
-  docs at https://docs.github.com/en/rest before relying on it.
+## Limitations
+
+| Limitation | Impact |
+|---|---|
+| GitHub search cap | User search exposes at most the first 1,000 results for a query. |
+| Missing account creation date | Account-age filter may not be usable for every profile. |
+| Rejected/previously-followed accounts | Not stored as confirmed follows and may be checked again later. |
+| Changing API behavior | Verify endpoints and token permissions against the current [GitHub REST API documentation](https://docs.github.com/en/rest). |
+| Scheduled-run variability | Timing depends on cron, repository activity, Actions availability, and scheduling delays. |
+| Candidate suitability | Search/eligibility rules do not guarantee every profile is relevant. |
+
+## Glossary
+
+| Term | Plain-English meaning |
+|---|---|
+| GitHub Actions | GitHub service for running workflows on events or schedules. |
+| Workflow | YAML instructions defining triggers, jobs, and permissions. |
+| Cron | Expression specifying a scheduled run time. |
+| Secret | Protected value, such as a token, stored by GitHub. |
+| PAT | Personal access token that authenticates as your GitHub user. |
+| REST API | Official interface for software to interact with GitHub. |
+| Rate limit | Restriction on request/action frequency. |
+| Pagination | Splitting a large result set into pages. |
+| Idempotent | Designed to avoid duplicate effects when repeated. |
+| Backoff | Waiting progressively longer between retry attempts. |
+| Dry run | Rehearsal that logs planned actions without performing follows. |
+| Concurrency group | Rule that prevents overlapping workflow runs in the same group. |
+| ISO 8601 UTC | Standard timestamp format, e.g. `2026-10-10T16:30:00Z`. |
+
+---
