@@ -198,7 +198,14 @@ Example cron schedules (UTC):
 | `17 9 * * *` | Daily at 09:17. |
 | `17 9 * * 1` | Every Monday at 09:17. |
 
+
+<img src="https://github.com/adidongre006/github-auto-follow/blob/main/Screenshot%20From%202026-10-25%2012-44-05.png?raw=true" alt="cron_schedule_1">
+<img src="https://github.com/adidongre006/github-auto-follow/blob/main/Screenshot%20From%202026-10-25%2012-44-43.png?raw=true" alt="cron_schedule_2">
+
+
+
 > **Schedule note:** The walkthrough and technical reference have described different intervals. Check the actual workflow YAML before relying on a particular cadence.
+---
 
 ### Protected default branch
 
